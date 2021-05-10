@@ -2,53 +2,17 @@
 
 import argparse
 import getpass
-import json
 import requests
 import sys
 import yaml
 
 from datetime import datetime
-from urllib.error import URLError
-from urllib.request import BaseHandler, HTTPRedirectHandler, Request, build_opener, install_opener, urlopen
+from requests.exceptions import RequestException
 
 # http://gitlab.corp.kelkoo.net/pack-conf/shivaBuildParents/-/blob/master/spark-applications/shivabuild.ini
 # https://docs.python.org/3/library/argparse.html#the-add-argument-method
-# https://docs.python.org/3/library/urllib.request.html?highlight=urllib#http-error-nnn
 # https://docs.python.org/3/library/email.compat32-message.html#email.message.Message
-# https://stackoverflow.com/questions/4981977/how-to-handle-response-encoding-from-urllib-request-urlopen
 # https://hadoop.apache.org/docs/r2.8.3/hadoop-project-dist/hadoop-hdfs/WebHDFS.html#Create_and_Write_to_a_File
-
-# custom HTTPRedirectHandler for WebHDFS
-class HdfsHTTPRedirectHandler(HTTPRedirectHandler):
-    def __init__(self):
-        super().__init__()
-
-    def redirect_request(self, req, fp, code, msg, hdrs, newurl):
-        if code == 307:
-            #hdrs.set_charset("utf-8")
-            #print(hdrs.get_content_type())
-            #print(hdrs.get_charset())
-            #print(hdrs.get_content_charset())
-            #print(hdrs.get_charsets())
-            #print(req.info().get_content_charset())
-            #print(hdrs['Content-Type'])
-            if req.data != None:
-                # rewind because file-like object has already been read by first request
-                req.data.seek(0)
-            return Request(url = newurl, data = req.data, method = req.get_method()) 
-
-# custom BaseHandler for WebHDFS
-class HdfsBaseHandler(BaseHandler):
-    def __init__(self):
-        super().__init__()
-
-    def http_error_403(self, req, fp, code, msg, hdrs):
-        jsonData = json.loads(fp.read())
-        sys.exit(jsonData['RemoteException']['message'])
-
-    def http_error_404(self, req, fp, code, msg, hdrs):
-        jsonData = json.loads(fp.read())
-        sys.exit(jsonData['RemoteException']['message'])
 
 def concat_path(path1, path2):
     if path1 == '':
@@ -70,9 +34,11 @@ def get_active_nn(nn_list):
             port = nn['Port']
         )
         try:
-            jsonData = json.loads(urlopen(jmx_url).read())
+            r = requests.get(jmx_url)
+            r.raise_for_status()
+            jsonData = r.json()
             return 'active' == jsonData['beans'][0]['State']
-        except URLError as e:
+        except RequestException:
             pass
 
     for nn in nn_list:
@@ -93,14 +59,14 @@ def get_str_perms(oct_perms):
 # implement 'hdfs dfs -cat'
 def hdfs_cat(args, user, webhdfs_prefix_url, default_dir):
     abs_path = args.path if args.path.startswith('/') else concat_path(default_dir, args.path)
-    webhdfs_url = "{prefix_url}/{path}?user.name={user}&op=OPEN".format(
+    parameters = {'user.name': user, 'op': 'OPEN'}
+    webhdfs_url = '{prefix_url}/{path}'.format(
         prefix_url = webhdfs_prefix_url,
-        path = abs_path.lstrip('/'),
-        user = user
+        path = abs_path.lstrip('/')
     )
-    # actual read is done by redirect_request in HdfsHTTPRedirectHandler
-    data = urlopen(webhdfs_url).read()
-    print(data.decode(sys.stdout.encoding))
+    r = requests.get(webhdfs_url, params=parameters, stream=True)
+    r.raise_for_status()
+    sys.stdout.buffer.write(r.content)
 
 # implement 'hdfs dfs -cp'
 def hdfs_cp(args, user, webhdfs_prefix_url, default_dir):
@@ -114,19 +80,16 @@ def hdfs_cp(args, user, webhdfs_prefix_url, default_dir):
             user = user
         )
         print(webhdfs_url)
-        #file_data = open(src_path)
-        #req = Request(url = webhdfs_url, data = file_data, method = 'PUT')
-        #urlopen(req)  # actual write is done by redirect_request in HdfsHTTPRedirectHandler
 
 # implement 'hdfs dfs -ls'
 def hdfs_ls(args, user, webhdfs_prefix_url, default_dir):
     abs_path = args.path if args.path.startswith('/') else concat_path(default_dir, args.path)
-    webhdfs_url = "{prefix_url}/{path}?user.name={user}&op=LISTSTATUS".format(
+    parameters = {'user.name': user, 'op': 'LISTSTATUS'}
+    webhdfs_url = '{prefix_url}/{path}'.format(
         prefix_url = webhdfs_prefix_url,
-        path = abs_path.strip('/'),
-        user = user
+        path = abs_path.strip('/')
     )
-    r = requests.get(webhdfs_url + '')
+    r = requests.get(webhdfs_url, params=parameters)
     r.raise_for_status()
     jsonData = r.json()
 
@@ -146,25 +109,24 @@ def hdfs_ls(args, user, webhdfs_prefix_url, default_dir):
 # implement 'hdfs dfs -mkdir'
 def hdfs_mkdir(args, user, webhdfs_prefix_url, default_dir):
     abs_path = args.path if args.path.startswith('/') else concat_path(default_dir, args.path)
-    webhdfs_url = "{prefix_url}/{path}?user.name={user}&op=MKDIRS".format(
+    parameters = {'user.name': user, 'op': 'MKDIRS'}
+    webhdfs_url = '{prefix_url}/{path}'.format(
         prefix_url = webhdfs_prefix_url,
-        path = abs_path.strip('/'),
-        user = user
+        path = abs_path.strip('/')
     )
-    r = requests.put(webhdfs_url)
+    r = requests.put(webhdfs_url, params=parameters)
     r.raise_for_status()
 
 # implement 'hdfs dfs -mv'
 def hdfs_mv(args, user, webhdfs_prefix_url, default_dir):
     abs_src_path = args.src_path if args.src_path.startswith('/') else concat_path(default_dir, args.src_path)
     abs_dst_path = args.dst_path if args.dst_path.startswith('/') else concat_path(default_dir, args.dst_path)
-    webhdfs_url = "{prefix_url}/{src}?user.name={user}&op=RENAME&destination={dst}".format(
+    parameters = {'user.name': user, 'op': 'RENAME', 'destination': abs_dst_path}
+    webhdfs_url = '{prefix_url}/{src}'.format(
         prefix_url = webhdfs_prefix_url,
-        src = abs_src_path.lstrip('/'),
-        user = user,
-        dst = abs_dst_path
+        src = abs_src_path.lstrip('/')
     )
-    r = requests.put(webhdfs_url)
+    r = requests.put(webhdfs_url, params=parameters)
     r.raise_for_status()
 
 # implement 'hdfs dfs -put'
@@ -173,26 +135,25 @@ def hdfs_put(args, user, webhdfs_prefix_url, default_dir):
     abs_dst_path = dst_path if dst_path.startswith('/') else concat_path(default_dir, dst_path)
     for src_path in args.path:
         dst_file = src_path.split('/').pop()
-        webhdfs_url = "{prefix_url}/{path}?user.name={user}&op=CREATE&encoding=utf-8".format(
+        parameters = {'user.name': user, 'op': 'CREATE', 'overwrite': 'true'}
+        webhdfs_url = '{prefix_url}/{path}'.format(
             prefix_url = webhdfs_prefix_url,
-            path = concat_path(abs_dst_path.lstrip('/'), dst_file),
-            user = user
+            path = concat_path(abs_dst_path.lstrip('/'), dst_file)
         )
-        file_data = open(src_path)
-        req = Request(url = webhdfs_url, data = file_data, method = 'PUT')
-        # actual write is done by redirect_request in HdfsHTTPRedirectHandler
-        urlopen(req)
+        file_content = open(src_path, 'rb')
+        r = requests.put(webhdfs_url, params=parameters, data=file_content)
+        r.raise_for_status()
 
 # implement 'hdfs dfs -rm'
 def hdfs_rm(args, user, webhdfs_prefix_url, default_dir):
     for path in args.path:
         abs_path = path if path.startswith('/') else concat_path(default_dir, path)
-        webhdfs_url = "{prefix_url}/{path}?user.name={user}&op=DELETE".format(
+        parameters = {'user.name': user, 'op': 'DELETE'}
+        webhdfs_url = '{prefix_url}/{path}'.format(
             prefix_url = webhdfs_prefix_url,
-            path = abs_path.strip('/'),
-            user = user
+            path = abs_path.strip('/')
         )
-        r = requests.delete(webhdfs_url)
+        r = requests.delete(webhdfs_url, params=parameters)
         r.raise_for_status()
 
 def load_config(conf_path) -> dict:
@@ -260,12 +221,6 @@ def main():
         default = '',
         help = 'a path pattern, default to ' + default_dir
     )
-    #parser_ls.add_argument(
-    #    'default_dir',
-    #    nargs = '?',
-    #    default = default_dir,
-    #    help = argparse.SUPPRESS
-    #)
     parser_ls.set_defaults(func = hdfs_ls)
 
     # mkdir subparser
@@ -325,6 +280,9 @@ def main():
 
     # parse and execute HDFS operation
     args = parser.parse_args()
-    args.func(args, user, webhdfs_prefix_url, default_dir)
+    try:
+        args.func(args, user, webhdfs_prefix_url, default_dir)
+    except RequestException as e:
+        print(e)
 
 main()
