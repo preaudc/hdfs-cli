@@ -51,7 +51,7 @@ def get_str_perms(oct_perms):
     rwx_perm_def = 'rwx'
     rwx_perms = ''
     for oct_perm in oct_perms:
-        bin_perm = "{0:b}".format(int(oct_perm))
+        bin_perm = f'{int(oct_perm):b}'
         for i in range(0, len(bin_perm)):
             rwx_perms += rwx_perm_def[i] if int(bin_perm[i]) else '-'
     return rwx_perms
